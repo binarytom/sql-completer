@@ -1,0 +1,19 @@
+{
+  "name": "sql-advisor-demo",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "test": "node --import ./scripts/test-loader.mjs --test tests/*.test.mjs",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "typescript": "~6.0.3",
+    "vite": "^8.3.4"
+  },
+  "dependencies": {
+    "@guanmingchiu/sqlparser-ts": "^0.63.0"
+  }
+}
