@@ -14,7 +14,77 @@
   → 展示建议 → 用户确认后替换原文
 ```
 
-`src/completion/types.ts` 定义共享契约，`context.ts` 分析光标，`service.ts` 编排搜索与排序；`src/metadata.ts` 实现 mock 索引。解析器的 WebAssembly 模块须初始化后再使用。SQL 只用于前端上下文分析，搜索接口接收搜索词和已解析的作用域，无须上传整段 SQL。
+SQL 只用于前端上下文分析，搜索接口接收搜索词和已解析的作用域，无须上传整段 SQL。解析器的 WebAssembly 模块须初始化后再使用，由公开入口统一等待初始化。
+
+## 分层与高内聚入口
+
+原有 `context → service → MetadataIndex` 的职责划分合理，主要问题是编辑器还需要了解解析器初始化、请求轮次、取消和替换细节；复制页面接入逻辑容易遗漏过期结果处理。现在由 `createSqlCompletion(config)` 聚合这些能力，编辑器只调用 `ready / complete / apply / cancel / dispose`，不直接导入内部解析或召回函数。
+
+```text
+main.ts：编辑器事件、防抖、候选呈现、写回文档、日志观察台
+    ↓ 公共入口 completion/index.ts
+engine.ts：初始化、输入校验、请求生命周期、结果与文档校验
+    ├─ service.ts：分析上下文、选择索引、并行召回、评分和去重
+    │      ├─ context.ts：分词、占位符 AST、有限修复、作用域
+    │      └─ MetadataIndex：注入的数据访问契约
+    │              └─ metadata.ts：独立 mock 适配器
+    └─ edits.ts：纯文本替换、函数插入后的光标定位
+```
+
+`types.ts` 定义共享契约，`index.ts` 选择导出公共类型；内部 `CompletionRequest`、底层编排函数不作为页面接入入口。引擎不导入 mock、DOM 或 HTTP 实现。这样既能统一编辑器接入，也能独立替换元数据来源；高内聚入口不要求把所有实现合并为一个文件。当前不增加通用插件框架，后续有多编辑器或复杂方言需求时，再分别扩展 UI 适配器和上下文规则。
+
+### 编辑器接口
+
+```ts
+interface SqlCompletionConfig {
+  index: MetadataIndex;
+  connectionId: string;
+  database: string;
+  dialect?: 'mysql' | 'postgresql' | 'generic'; // 默认 mysql
+  limit?: number;                            // 1..100 整数，默认 30
+  matchMode?: 'prefix' | 'contains';          // 默认 prefix
+}
+
+interface SqlDocument {
+  sql: string;
+  cursor: number; // UTF-16 偏移；范围 0..sql.length
+}
+
+interface SqlCompletion {
+  ready(): Promise<void>;
+  complete(
+    input: SqlDocument & { database?: string; dialect?: SqlDialect },
+    options?: { signal?: AbortSignal },
+  ): Promise<SqlCompletionResult>;
+  apply(input: {
+    document: SqlDocument;
+    result: SqlCompletionResult;
+    itemId: string;
+  }): AppliedCompletion;
+  cancel(): void;
+  dispose(): void;
+}
+
+interface SqlCompletionResult {
+  requestId: string;
+  context: CompletionContext;
+  items: CompletionItem[]; // 包含 score / reason，已排序
+  elapsedMs: number;
+  errors: string[];       // 单个索引失败可部分成功
+}
+
+interface AppliedCompletion extends SqlDocument {
+  edit: { range: { start: number; end: number }; text: string };
+}
+```
+
+`connectionId` 和默认 `database` 必须非空；单次 `complete` 可覆盖当前库和方言。`ready()` 是可选预热，`complete()` 本身会等待解析器；初始化 Promise 在当前运行环境中全局复用，失败后应重新加载页面，当前未提供初始化重试接口。
+
+一个实例绑定一个编辑器。开始有效的新请求时，旧请求被取消、旧结果立即失效；新请求失败也不会恢复旧结果。外部取消、`cancel()`、新请求和 `dispose()` 会令进行中的调用以 `AbortError` 拒绝，即使注入的索引忽略 `signal` 也能及时结束公开调用。底层索引仍应传递取消信号，释放网络和计算资源。
+
+`apply()` 校验返回对象属于本实例的最新结果、当前 SQL 和光标完全一致、候选 ID 合法，然后使用私有快照里的原始候选和替换范围生成变更。修改展示用 `items` 或 `context` 不会改变实际插入行为。范围使用 `[start, end)`，所有偏移均为 UTF-16；接口只处理单光标，非空选区由编辑器抑制补全。UI 在文档、光标、当前库或方言变化时立即调用 `cancel()`，然后安排新请求；接受候选时传入真实当前文档，不能用旧快照冒充当前文档。
+
+接受一次即令结果失效。`apply()` 抛出带 `code` 的 `SqlCompletionError`：`STALE_RESULT`（结果失效或属于其他实例）、`DOCUMENT_CHANGED`（SQL/光标变化）、`UNKNOWN_ITEM`（未知候选）、`DISPOSED`（实例已销毁）。`ready()` / `complete()` 在销毁后也会拒绝 `DISPOSED`；配置和输入校验失败使用 `TypeError` / `RangeError`。`cancel()` 后可继续补全；`dispose()` 为终态，可重复调用。完整运行示例见 [README](../README.md#补全模块接入)。
 
 ## 不完整 SQL：占位符不能丢失输入前缀
 
@@ -138,12 +208,45 @@ mock 包含 `demo.users/orders/products`、`analytics.events/sessions/revenue_da
 
 已有标识符引号时保留其定界符；缺少结束引号时，接受建议会补齐。标识符中的同类引号做双写转义，限定字段按每个路径部分分别引用。无引号输入遇到空格、特殊字符或常见保留字（如 `order`）时，按 MySQL 反引号或 PostgreSQL/Generic 双引号自动引用。当前使用保守的跨方言常见保留字字典，生产应接入对应数据库版本的完整关键字表。
 
-接口的 `items` 不等于最终建议顺序。当前补全链路以 `limit: 30` 仅召回各接口第一页，超大目录可能漏掉后续页中的高分项；生产可扩大候选窗口，或定义服务端召回排序再由前端重排。多个接口并行调用，单个接口失败不会丢弃其他接口的成功结果，错误通过 `CompletionResult.errors` 展示。
+接口的 `items` 不等于最终建议顺序。当前补全链路默认以 `limit: 30` 仅召回各接口第一页，可通过实例配置调整到 `100`，超大目录可能漏掉后续页中的高分项；生产可定义服务端召回排序再由前端重排。多个接口并行调用，单个接口失败不会丢弃其他接口的成功结果，错误通过公开结果 `SqlCompletionResult.errors` 展示。
 
-每次调用立即执行 `console.info('[metadata-index]', endpoint, params)`，页面可通过 `createMockMetadataIndex(onLog)` 接收同样的参数快照与 `pending/success/error/cancelled` 状态。日志 ID 为 `requestId:endpoint`。提前取消的请求不发起、不记录；进行中的请求支持取消。新输入还须使用轮次标识丢弃过期结果，避免旧建议覆盖新建议。
+每次调用立即执行 `console.info('[metadata-index]', endpoint, params)`，页面可通过 `createMockMetadataIndex(onLog)` 接收同样的参数快照与 `pending/success/error/cancelled` 状态。日志 ID 为 `requestId:endpoint`。提前取消的请求不发起、不记录；进行中的请求支持取消。引擎生成每个实例、每轮请求的标识并丢弃过期结果，页面不再自行生成 `requestId` 或管理请求的 `AbortController`。
 
 mock 的 `cursor` 绑定接口、搜索条件和作用域；修改搜索条件后不能复用旧 cursor。无效连接、参数或 cursor 会 reject，真实服务建议映射为结构化 `400/401/403/429/503` 错误。
 
 ## 接入真实服务
+
+当前没有内置 HTTP 适配器，可按以下方式实现同一契约，再传入 `createSqlCompletion({ index, connectionId, database })`：
+
+```ts
+import type {
+  MetadataIndex, SearchOptions, SearchParams, SearchResult,
+} from './src/completion/index';
+
+async function post(
+  resource: string,
+  params: SearchParams,
+  options?: SearchOptions,
+): Promise<SearchResult> {
+  const response = await fetch(`/api/completion/${resource}/search`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+    signal: options?.signal,
+  });
+  if (!response.ok) throw new Error(`索引请求失败：${response.status}`);
+  return response.json() as Promise<SearchResult>;
+}
+
+const index: MetadataIndex = {
+  searchDatabases: (params, options) => post('databases', params, options),
+  searchTables: (params, options) => post('tables', params, options),
+  searchColumns: (params, options) => post('columns', params, options),
+  searchFunctions: (params, options) => post('functions', params, options),
+  searchKeywords: (params, options) => post('keywords', params, options),
+};
+```
+
+路径相对于仓库根目录；`SearchParams` 接受各方法传入的扩展对象，因此 `database`、`tables`、`clause` 同样保留在 JSON 中。示例仅展示传输映射；生产适配器还应校验响应结构、响应 `requestId`、同一结果内 ID 唯一性，并按需要设置超时。`SearchOptions` 仅承载 `signal`，召回策略由引擎配置写入每次请求的 `limit` / `matchMode`。
 
 由服务端做连接鉴权、库表字段权限过滤、方言过滤、限流、缓存及超时；前端传入的 `tables` 只表示请求范围，不能作为授权依据。游标应采用服务端签名的不透明 token，并随元数据版本失效。搜索可为规范化名称建立前缀索引，包含搜索按需要增加全文/三元组索引；所有查询使用参数绑定。生产日志应按权限脱敏，不照搬 demo 的完整控制台参数输出。

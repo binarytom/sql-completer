@@ -2,13 +2,13 @@
 
 ## Project Structure & Module Organization
 
-This browser SQL completion demo uses TypeScript, Vite, and `@guanmingchiu/sqlparser-ts`.
+SQL completion uses TypeScript, Vite, and `@guanmingchiu/sqlparser-ts`.
 
-- `src/main.ts` implements the editor, completion popup, catalog, and request inspector; `src/style.css` styles the page.
-- `src/completion/context.ts` derives cursor context using sentinel parsing, bounded recovery, and lexical fallback. `service.ts` searches providers and ranks candidates; `types.ts` defines shared contracts.
+- `src/main.ts` owns editor UI; `src/style.css` styles it.
+- `src/completion/index.ts` is the public integration surface. `engine.ts` owns initialization, cancellation, result validity, and application. `context.ts` derives SQL context; `service.ts` searches and ranks; `edits.ts` applies pure document edits; `types.ts` defines contracts.
 - `src/metadata.ts` implements five asynchronous mock index searches: databases, tables, columns, functions, and keywords.
-- `tests/*.test.mjs` contains contract and completion tests; `scripts/test-loader.mjs` loads TypeScript source in Node.
-- `docs/completion-design.md` documents the architecture and proposed HTTP endpoints. `public/` and `src/assets/` contain static assets.
+- `tests/*.test.mjs` contains tests; `scripts/test-loader.mjs` loads TypeScript in Node.
+- `docs/completion-design.md` documents architecture and proposed HTTP endpoints; `public/` and `src/assets/` contain static assets.
 
 ## Build, Test, and Development Commands
 
@@ -24,7 +24,7 @@ Use two-space indentation, ES module imports, single-quoted strings, and semicol
 
 ## Testing Guidelines
 
-Run `npm test` and `npm run build` before submitting changes. Add descriptive `*.test.mjs` cases for behavioral changes; no coverage threshold is configured. Check incomplete SQL, cursor replacement ranges, qualified names, aliases, statement boundaries, and suppression inside comments or strings. Verify metadata scope, pagination, cancellation, and complete parameter logging. Await parser initialization before parsing. For UI changes, verify keyboard insertion and production preview in a browser.
+Before submitting, run `npm test` and `npm run build`. Name behavioral tests `*.test.mjs`; no coverage threshold applies. Cover incomplete SQL, replacement ranges, qualified names, aliases, statement boundaries, and comment/string suppression. Verify metadata scope, pagination, cancellation, stale results, document changes, disposal, and complete parameter logging. Check UI keyboard insertion and production preview in a browser.
 
 ## Commit & Pull Request Guidelines
 
@@ -33,3 +33,5 @@ Use concise, imperative commit subjects, such as `Fix qualified table extraction
 ## Parser & Configuration Notes
 
 Keep recovery edits confined to a parsing copy; preserve original editor offsets. The Vite loader transform packages the dependency's JavaScript glue and WASM together; retain it when changing parser initialization. Mock requests use `connectionId: 'demo-local'`; future adapters must enforce connection and catalog authorization server-side.
+
+Use one `createSqlCompletion` instance per editor via `index.ts`. Inject `MetadataIndex`; keep DOM/mock dependencies outside the engine. Use UTF-16 offsets and real current documents in `apply()`. Synchronize README examples with exported contracts.

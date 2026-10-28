@@ -1,6 +1,6 @@
 import { analyzeContext, initializeParser } from './context';
 import type {
-  CompletionContext, CompletionItem, CompletionKind, CompletionRequest,
+  CompletionContext, CompletionItem, CompletionKind, CompletionRequest, CompletionSearchOptions,
   CompletionResult, IndexItem, MetadataIndex, SearchOptions, SearchParams,
   SearchResult, TableReference,
 } from './types';
@@ -136,13 +136,22 @@ function rankedItem(candidate: Candidate, context: CompletionContext, request: C
 export async function complete(
   request: CompletionRequest,
   index: MetadataIndex,
-  options?: SearchOptions,
+  options?: CompletionSearchOptions,
 ): Promise<CompletionResult> {
   const startedAt = Date.now();
   request = { ...request };
-  assertActive(options);
+  const searchOptions = options?.signal ? { signal: options.signal } : undefined;
+  const limit = options?.limit === undefined ? 30 : options.limit;
+  const matchMode = options?.matchMode === undefined ? 'prefix' : options.matchMode;
+  assertActive(searchOptions);
+  if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+    throw new RangeError('limit 必须为 1 到 100 之间的整数');
+  }
+  if (matchMode !== 'prefix' && matchMode !== 'contains') {
+    throw new TypeError('matchMode 必须为 prefix 或 contains');
+  }
   await initializeParser();
-  assertActive(options);
+  assertActive(searchOptions);
   const context = analyzeContext(request);
   if (context.parserStatus === 'suppressed' || context.kinds.length === 0) {
     return { context, items: [], errors: [], elapsedMs: Date.now() - startedAt };
@@ -152,37 +161,37 @@ export async function complete(
     connectionId: request.connectionId,
     dialect: request.dialect,
     query: context.prefix,
-    matchMode: 'prefix',
-    limit: 30,
+    matchMode,
+    limit,
   };
   const references = scopedTables(context);
   const providers: { kind: CompletionKind; run: () => Promise<SearchResult> }[] = [];
   for (const kind of new Set(context.kinds)) {
     switch (kind) {
       case 'database':
-        providers.push({ kind, run: () => index.searchDatabases(base, options) });
+        providers.push({ kind, run: () => index.searchDatabases(base, searchOptions) });
         break;
       case 'table': {
         const database = context.qualifier ?? request.database;
-        providers.push({ kind, run: () => index.searchTables({ ...base, database }, options) });
+        providers.push({ kind, run: () => index.searchTables({ ...base, database }, searchOptions) });
         break;
       }
       case 'column':
-        if (references.length > 0) providers.push({ kind, run: () => index.searchColumns({ ...base, tables: references }, options) });
+        if (references.length > 0) providers.push({ kind, run: () => index.searchColumns({ ...base, tables: references }, searchOptions) });
         break;
       case 'function':
-        providers.push({ kind, run: () => index.searchFunctions({ ...base, database: request.database }, options) });
+        providers.push({ kind, run: () => index.searchFunctions({ ...base, database: request.database }, searchOptions) });
         break;
       case 'keyword':
-        providers.push({ kind, run: () => index.searchKeywords({ ...base, clause: context.clause }, options) });
+        providers.push({ kind, run: () => index.searchKeywords({ ...base, clause: context.clause }, searchOptions) });
         break;
     }
   }
   const results = await Promise.allSettled(providers.map((provider) => Promise.resolve().then(() => {
-    assertActive(options);
+    assertActive(searchOptions);
     return provider.run();
   })));
-  assertActive(options);
+  assertActive(searchOptions);
   const candidates: Candidate[] = [];
   const errors: string[] = [];
   results.forEach((result, position) => {

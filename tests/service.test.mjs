@@ -53,6 +53,39 @@ test('qualified field completion sends the original prefix and exact alias scope
   assert.equal(input.sql.slice(0, start) + response.items[0].insertText + input.sql.slice(end), 'SELECT u.email FROM demo.users u');
 });
 
+test('completion search options configure recall without leaking into transport options', async () => {
+  const controller = new AbortController();
+  const { index, calls } = indexFixture();
+  await complete(request('SELECT | FROM demo.users'), index, {
+    limit: 7, matchMode: 'contains', signal: controller.signal,
+  });
+  assert.ok(calls.length > 1, 'exercise parallel provider calls');
+  for (const call of calls) {
+    assert.equal(call.params.limit, 7);
+    assert.equal(call.params.matchMode, 'contains');
+    assert.deepEqual(call.options, { signal: controller.signal });
+  }
+
+  const withoutSignal = indexFixture();
+  await complete(request('SELECT * FROM us|'), withoutSignal.index, { limit: 1 });
+  assert.equal(withoutSignal.calls[0].params.limit, 1);
+  assert.equal(withoutSignal.calls[0].params.matchMode, 'prefix');
+  assert.equal(withoutSignal.calls[0].options, undefined);
+});
+
+test('invalid recall configuration rejects before querying providers', async () => {
+  for (const limit of [0, 101, 1.5, NaN, Infinity, '30', null]) {
+    const { index, calls } = indexFixture();
+    await assert.rejects(complete(request('SELECT |'), index, { limit }), { name: 'RangeError' });
+    assert.deepEqual(calls, []);
+  }
+  for (const matchMode of ['', 'fuzzy', null]) {
+    const { index, calls } = indexFixture();
+    await assert.rejects(complete(request('SELECT |'), index, { matchMode }), { name: 'TypeError' });
+    assert.deepEqual(calls, []);
+  }
+});
+
 test('database-qualified FROM completion narrows the table endpoint', async () => {
   const { index, calls } = indexFixture();
   await complete(request('SELECT * FROM analytics.ev|'), index);

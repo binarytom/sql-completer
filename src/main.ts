@@ -1,8 +1,7 @@
 import './style.css';
-import { initializeParser } from './completion/context';
-import { complete } from './completion/service';
+import { createSqlCompletion } from './completion/index';
 import { createMockMetadataIndex, MOCK_DATABASES } from './metadata';
-import type { CompletionItem, CompletionResult, RequestLog, SqlDialect } from './completion/types';
+import type { CompletionItem, SqlCompletionResult, RequestLog, SqlDialect } from './completion/index';
 
 const icons = {
   database: '<ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 4 16 4 16 0V5M4 12c0 4 16 4 16 0"/>',
@@ -70,11 +69,9 @@ const button = document.querySelector<HTMLButtonElement>('#complete-button')!;
 const database = document.querySelector<HTMLSelectElement>('#database')!;
 const dialect = document.querySelector<HTMLSelectElement>('#dialect')!;
 let ready = false;
-let result: CompletionResult | undefined;
+let result: SqlCompletionResult | undefined;
 let selected = 0;
-let requestVersion = 0;
 let timer: ReturnType<typeof setTimeout> | undefined;
-let controller: AbortController | undefined;
 let isComposing = false;
 let dismissed = false;
 const logs: RequestLog[] = [];
@@ -90,6 +87,9 @@ const index = createMockMetadataIndex((entry) => {
   if (logs.length > 50) logs.length = 50;
   if (!selectedLog || !logs.some((log) => log.id === selectedLog)) selectedLog = logs[0]?.id;
   renderLogs();
+});
+const completion = createSqlCompletion({
+  index, connectionId: 'demo-local', database: 'demo', dialect: 'mysql',
 });
 
 const catalogTables: Record<string, string[]> = { demo: ['users', 'orders', 'products'], analytics: ['events', 'sessions', 'revenue_daily'], warehouse: ['dim_customers', 'fact_orders'] };
@@ -171,24 +171,21 @@ function renderContext() {
 }
 
 async function requestCompletion() {
-  if (!ready || isComposing) return;
-  const version = ++requestVersion;
-  controller?.abort();
-  controller = new AbortController();
+  if (!ready || isComposing || editor.selectionStart !== editor.selectionEnd) return;
   result = undefined;
   hidePopup();
   const sql = editor.value;
   const cursor = editor.selectionStart;
   document.querySelector('#parser-status')!.innerHTML = '<span class="loading-dot"></span>检索候选…';
   try {
-    const nextResult = await complete({ sql, cursor, database: database.value, dialect: dialect.value as SqlDialect, connectionId: 'demo-local', requestId: `completion-${version}` }, index, { signal: controller.signal });
-    if (version !== requestVersion || sql !== editor.value || cursor !== editor.selectionStart) return;
+    const nextResult = await completion.complete({ sql, cursor, database: database.value, dialect: dialect.value as SqlDialect });
+    if (sql !== editor.value || cursor !== editor.selectionStart || cursor !== editor.selectionEnd) return;
     result = nextResult;
     selected = 0;
     renderContext();
     renderCandidates();
   } catch (error) {
-    if (version !== requestVersion || (error instanceof Error && error.name === 'AbortError')) return;
+    if (error instanceof Error && error.name === 'AbortError') return;
     document.querySelector('#parser-status')!.textContent = '补全请求失败';
     showToast(error instanceof Error ? error.message : String(error));
   }
@@ -196,29 +193,34 @@ async function requestCompletion() {
 
 function scheduleCompletion(delay = 160) {
   clearTimeout(timer);
-  controller?.abort();
-  requestVersion++;
+  completion.cancel();
   result = undefined;
   dismissed = false;
   hidePopup();
-  timer = setTimeout(requestCompletion, delay);
+  if (editor.selectionStart === editor.selectionEnd) timer = setTimeout(requestCompletion, delay);
 }
 
 function acceptCandidate(item: CompletionItem) {
-  if (!result) return;
-  const { start, end } = result.context.replaceRange;
-  let insert = item.insertText;
-  if (item.kind === 'function' && /^\s*\(/.test(editor.value.slice(end))) insert = insert.replace(/\(\)$/, '');
-  editor.setRangeText(insert, start, end, 'end');
-  let cursor = start + insert.length;
-  if (item.kind === 'function' && insert.endsWith('()')) cursor--;
-  editor.focus();
-  editor.setSelectionRange(cursor, cursor);
-  hidePopup();
-  dismissed = true;
-  syncEditor();
-  showToast(`已插入 ${item.label}`);
-  if (item.kind === 'database') scheduleCompletion(0);
+  if (!result || editor.selectionStart !== editor.selectionEnd) return;
+  try {
+    const next = completion.apply({
+      document: { sql: editor.value, cursor: editor.selectionStart },
+      result, itemId: item.id,
+    });
+    const { start, end } = next.edit.range;
+    editor.setRangeText(next.edit.text, start, end, 'end');
+    editor.focus();
+    editor.setSelectionRange(next.cursor, next.cursor);
+    hidePopup();
+    dismissed = true;
+    syncEditor();
+    showToast(`已插入 ${item.label}`);
+    if (item.kind === 'database') scheduleCompletion(0);
+  } catch (error) {
+    hidePopup();
+    showToast(error instanceof Error ? error.message : String(error));
+    scheduleCompletion(0);
+  }
 }
 
 function renderLogs() {
@@ -252,17 +254,26 @@ function loadSample(position: number) {
 }
 
 editor.addEventListener('input', () => { syncEditor(); if (!isComposing) scheduleCompletion(); });
-editor.addEventListener('compositionstart', () => { isComposing = true; controller?.abort(); hidePopup(); });
+editor.addEventListener('compositionstart', () => { isComposing = true; clearTimeout(timer); completion.cancel(); result = undefined; hidePopup(); });
 editor.addEventListener('compositionend', () => { isComposing = false; syncEditor(); scheduleCompletion(); });
 editor.addEventListener('scroll', () => { syncEditor(); if (!popup.classList.contains('hidden')) positionPopup(); });
 editor.addEventListener('click', () => { syncEditor(); scheduleCompletion(); });
+editor.addEventListener('select', () => {
+  syncEditor();
+  if (editor.selectionStart !== editor.selectionEnd) {
+    clearTimeout(timer);
+    completion.cancel();
+    result = undefined;
+    hidePopup();
+  }
+});
 editor.addEventListener('keyup', (event) => {
   if (['ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown'].includes(event.key) || (popup.classList.contains('hidden') && ['ArrowUp', 'ArrowDown'].includes(event.key))) { syncEditor(); scheduleCompletion(); }
 });
 editor.addEventListener('keydown', (event) => {
   if (event.isComposing) return;
   if ((event.ctrlKey || event.metaKey) && event.code === 'Space') { event.preventDefault(); dismissed = false; scheduleCompletion(0); return; }
-  if (event.key === 'Escape') { event.preventDefault(); clearTimeout(timer); controller?.abort(); requestVersion++; dismissed = true; hidePopup(); return; }
+  if (event.key === 'Escape') { event.preventDefault(); clearTimeout(timer); completion.cancel(); result = undefined; dismissed = true; hidePopup(); return; }
   if (!popup.classList.contains('hidden') && result?.items.length) {
     if (event.key === 'ArrowDown' || event.key === 'ArrowUp') { event.preventDefault(); selected = (selected + (event.key === 'ArrowDown' ? 1 : -1) + result.items.length) % result.items.length; renderCandidates(); return; }
     if (event.key === 'Enter' || event.key === 'Tab') { event.preventDefault(); acceptCandidate(result.items[selected]); return; }
@@ -292,9 +303,11 @@ document.querySelector('#catalog')!.addEventListener('click', (event) => {
   syncEditor(); scheduleCompletion(0);
 });
 window.addEventListener('resize', () => { if (!popup.classList.contains('hidden')) positionPopup(); });
+window.addEventListener('pagehide', () => { clearTimeout(timer); completion.cancel(); });
+if (import.meta.hot) import.meta.hot.dispose(() => { clearTimeout(timer); completion.dispose(); });
 
 loadSample(0);
-initializeParser().then(() => { ready = true; button.disabled = false; scheduleCompletion(0); }).catch((error: unknown) => {
+completion.ready().then(() => { ready = true; button.disabled = false; scheduleCompletion(0); }).catch((error: unknown) => {
   document.querySelector('#parser-status')!.textContent = 'WASM 初始化失败';
   document.querySelector('#context-content')!.innerHTML = `<div class="inline-error">${escapeHtml(error instanceof Error ? error.message : error)}<br>请确认 WebAssembly 资源可访问后刷新页面。</div>`;
   console.error('[sql-completion] WASM initialization failed', error);

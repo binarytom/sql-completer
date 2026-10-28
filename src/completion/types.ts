@@ -75,6 +75,12 @@ export interface SearchOptions {
   signal?: AbortSignal;
 }
 
+/** Completion policy stays separate from the metadata transport options. */
+export interface CompletionSearchOptions extends SearchOptions {
+  limit?: number;
+  matchMode?: SearchParams['matchMode'];
+}
+
 export interface MetadataIndex {
   searchDatabases(params: DatabaseSearchParams, options?: SearchOptions): Promise<SearchResult>;
   searchTables(params: TableSearchParams, options?: SearchOptions): Promise<SearchResult>;
@@ -102,6 +108,55 @@ export interface CompletionResult {
   items: CompletionItem[];
   elapsedMs: number;
   errors: string[];
+}
+
+/** Offsets are UTF-16 string indices, matching textarea.selectionStart. */
+export interface SqlDocument {
+  sql: string;
+  cursor: number;
+}
+
+export interface SqlCompletionInput extends SqlDocument {
+  database?: string;
+  dialect?: SqlDialect;
+}
+
+export interface SqlCompletionConfig {
+  index: MetadataIndex;
+  connectionId: string;
+  database: string;
+  dialect?: SqlDialect;
+  /** Candidate recall window per metadata endpoint, integer 1..100; default 30. */
+  limit?: number;
+  matchMode?: SearchParams['matchMode'];
+}
+
+export interface SqlCompletionResult extends CompletionResult {
+  requestId: string;
+}
+
+export interface CompletionTextEdit {
+  range: TextRange;
+  text: string;
+}
+
+export interface AppliedCompletion extends SqlDocument {
+  edit: CompletionTextEdit;
+}
+
+export interface ApplyCompletionInput {
+  document: SqlDocument;
+  result: SqlCompletionResult;
+  itemId: string;
+}
+
+/** One instance represents one editor and owns its request lifecycle. */
+export interface SqlCompletion {
+  ready(): Promise<void>;
+  complete(input: SqlCompletionInput, options?: SearchOptions): Promise<SqlCompletionResult>;
+  apply(input: ApplyCompletionInput): AppliedCompletion;
+  cancel(): void;
+  dispose(): void;
 }
 
 export interface RequestLog {
