@@ -48,6 +48,69 @@ test('SELECT projection resolves tables and joins that appear after the caret', 
   ]);
 });
 
+test('explicit AS alias positions have no catalog candidates, including parser fallback', () => {
+  for (const dialect of ['mysql', 'postgresql', 'generic']) {
+    for (const [sql, status] of [
+      ["SELECT u.email AS |\nFROM demo.users AS u\nWHERE u.status = 'active';", 'parsed'],
+      ['SELECT u.email AS user_em|ail FROM demo.users u', 'parsed'],
+      ['SELECT u.email AS /* alias */ | FROM demo.users u', 'parsed'],
+      ['SELECT * FROM demo.users AS |', 'parsed'],
+      ['SELECT * FROM demo.users AS us|ers', 'parsed'],
+      ['SELECT * FROM demo.users u JOIN demo.orders AS | ON u.id = user_id', 'parsed'],
+      ['SELECT u.email AS | FROM demo.users u WHERE id =', 'recovered'],
+      ['SELECT u.email AS | FROM demo.users u WHERE id = =', 'lexical'],
+      ['SELECT * FROM demo.users AS | WHERE id = =', 'lexical'],
+    ]) {
+      const { context } = analyze(sql, { dialect });
+      assert.equal(context.parserStatus, status, `${dialect}: ${sql}`);
+      assert.deepEqual(context.kinds, [], `${dialect}: ${sql}`);
+    }
+  }
+  const { context, request } = analyze('SELECT email AS user_em|ail FROM demo.users');
+  assert.equal(context.prefix, 'user_em');
+  assert.equal(request.sql.slice(context.replaceRange.start, context.replaceRange.end), 'user_email');
+  for (const [sql, dialect] of [
+    ['SELECT email AS `user_em|ail` FROM demo.users', 'mysql'],
+    ['SELECT email AS "user_em|ail" FROM demo.users', 'postgresql'],
+  ]) {
+    assert.deepEqual(analyze(sql, { dialect }).context.kinds, [], sql);
+  }
+});
+
+test('implicit aliases only recall keywords that match the prefix and fit the preceding SQL', () => {
+  for (const dialect of ['mysql', 'postgresql', 'generic']) {
+    for (const sql of [
+      'SELECT email user_em| FROM demo.users',
+      'SELECT email | FROM demo.users',
+      'SELECT * FROM demo.users user_em|',
+      'SELECT email user_em| FROM demo.users WHERE id = =',
+      'SELECT * FROM demo.users user_em| WHERE id = =',
+      dialect === 'mysql' ? 'SELECT email `FR|` FROM demo.users' : 'SELECT email "FR|" FROM demo.users',
+    ]) {
+      assert.deepEqual(analyze(sql, { dialect }).context.kinds, [], `${dialect}: ${sql}`);
+    }
+    for (const sql of [
+      'SELECT email FR|',
+      'SELECT email fr| demo.users',
+      'SELECT email F|oo',
+      'SELECT * FROM demo.users WH|',
+      'SELECT * FROM demo.users JO| demo.orders ON users.id = orders.user_id',
+      'SELECT * FROM demo.users JOIN demo.orders O|',
+      'SELECT email A|',
+      'SELECT * FROM demo.users GR|',
+      'SELECT email FR| /* missing table */',
+      'SELECT email FR| demo.users WHERE id =',
+    ]) {
+      assert.deepEqual(analyze(sql, { dialect }).context.kinds, ['keyword'], `${dialect}: ${sql}`);
+    }
+  }
+});
+
+test('CAST AS is not treated as alias declaration', () => {
+  const { context } = analyze('SELECT CAST(email AS |) FROM demo.users');
+  assert.notDeepEqual(context.kinds, []);
+});
+
 test('qualified table lookup preserves the database and excludes the synthetic table from scope', () => {
   const { context } = analyze('SELECT * FROM warehouse.acc|');
   assert.equal(context.prefix, 'acc');

@@ -1,4 +1,4 @@
-import { analyzeContext, initializeParser } from './context.js';
+import { analyzeCompletionContext, initializeParser } from './context.js';
 import type {
   CompletionContext, CompletionItem, CompletionKind, CompletionRequest, CompletionSearchOptions,
   CompletionResult, IndexItem, MetadataIndex, SearchOptions, SearchParams,
@@ -152,7 +152,7 @@ export async function complete(
   }
   await initializeParser();
   assertActive(searchOptions);
-  const context = analyzeContext(request);
+  const { context, aliasKeywords } = analyzeCompletionContext(request);
   if (context.parserStatus === 'suppressed' || context.kinds.length === 0) {
     return { context, items: [], errors: [], elapsedMs: Date.now() - startedAt };
   }
@@ -204,7 +204,8 @@ export async function complete(
       errors.push(`${kind}: 忽略不匹配的 requestId`);
       return;
     }
-    const items = result.value.items.filter((item) => item.kind === kind);
+    const items = result.value.items.filter((item) => item.kind === kind &&
+      (kind !== 'keyword' || aliasKeywords === undefined || aliasKeywords.includes(item.insertText.trim().replace(/\s+/g, ' ').toUpperCase())));
     if (kind === 'column') {
       candidates.push(...columnCandidates(items, references, Boolean(context.qualifier)));
     } else {

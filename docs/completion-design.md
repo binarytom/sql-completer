@@ -137,6 +137,14 @@ interface AppliedCompletion extends SqlDocument {
 
 同理，`FROM demo.us|` 保存 `query = "us"`，解析副本为 `FROM demo.__suggestion__`，召回 `demo` 下的表；空白位置则保存空前缀和零长度替换范围。中间编辑时，搜索词只取 token 起点至光标，替换范围仍覆盖整个 token。
 
+别名位置使用以下规则，不能直接将 AST 的 `alias` 映射成 `keyword`：
+
+- 显式 `AS` 后声明新的列别名或表别名，例如 `SELECT u.email AS | FROM demo.users u`：返回空候选类别，不请求元数据。顶层 SELECT、FROM、JOIN 中的此规则在解析失败时仍生效。
+- 隐式别名没有匹配的后续关键字前缀，例如 `SELECT email user_em| FROM demo.users`：返回空候选。空前缀及带引号的别名也不召回普通关键字。
+- 隐式别名与关键字前缀有歧义，例如 `SELECT email FR|`：从核心支持的后续关键字集合中按原始前缀匹配（大小写不敏感），用目标 token 之前的 SQL 及试填关键字构造解析副本，补齐该关键字需要的占位表、表达式等，保留能够通过直接解析或有限尾部修复的候选，才请求关键字接口。该策略只判断关键字能否接在光标前的 SQL 后，暂不处理光标后的子句冲突。索引返回的实际 `insertText` 还必须属于上述候选集合；即使配置了 `contains`，这里仍使用前缀约束。
+
+原始 SQL 的后缀无法解析时，会尝试用光标前的解析副本识别别名角色，再应用同样的规则，避免退回宽泛的字段或关键字检索。这里采用有界的语法检查，覆盖 AS、FROM、JOIN 及其常见修饰形式、ON、USING、WHERE、GROUP BY、HAVING、ORDER BY、LIMIT、OFFSET 和集合运算；不代表完整方言语法或语义校验。试填和尾部修复均不会修改编辑器文档。
+
 ### 解析与恢复原则
 
 - **直接解析**：优先解析当前语句的占位符副本，检查占位符所在 AST 节点及父节点；标识符、表引用、函数名的位置有不同召回类别。

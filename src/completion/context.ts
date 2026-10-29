@@ -38,6 +38,18 @@ interface MarkerLocation {
   clause?: SqlClause;
 }
 
+interface CompletionAnalysis {
+  context: CompletionContext;
+  // Internal policy: metadata keyword results must also pass this allowlist.
+  aliasKeywords?: string[];
+}
+
+const aliasContinuations = [
+  'AS', 'FROM', 'JOIN', 'LEFT JOIN', 'RIGHT JOIN', 'INNER JOIN', 'FULL JOIN',
+  'CROSS JOIN', 'NATURAL JOIN', 'ON', 'USING', 'WHERE', 'GROUP BY', 'HAVING',
+  'ORDER BY', 'LIMIT', 'OFFSET', 'UNION', 'EXCEPT', 'INTERSECT',
+];
+
 let initialization: Promise<void> | undefined;
 
 export function initializeParser(): Promise<void> {
@@ -324,11 +336,39 @@ function repairCandidates(sql: string, dialect: SqlDialect): { sql: string; reas
   return candidates;
 }
 
+function aliasKeywordCandidates(request: CompletionRequest, context: CompletionContext): string[] {
+  if (!context.prefix || context.qualifier) return [];
+  const left = request.sql.slice(context.statementRange.start, context.replaceRange.start);
+  return aliasContinuations.filter((keyword) => {
+    if (!keyword.startsWith(context.prefix.toUpperCase())) return false;
+    // Check only the SQL before the target token. Suffix conflicts are outside
+    // this policy; synthetic operands make incomplete continuations parseable.
+    const filler = keyword === 'AS' || keyword === 'FROM' || keyword.endsWith('JOIN') ? ` ${recoveryTable}`
+      : keyword === 'USING' ? ' (id)'
+      : ['UNION', 'EXCEPT', 'INTERSECT'].includes(keyword) ? ' SELECT 1'
+      : ' 1';
+    const probe = `${left}${keyword}${filler}`;
+    for (const attempt of [{ sql: probe }, ...repairCandidates(probe, request.dialect)]) {
+      try {
+        const ast: unknown = parse(attempt.sql, request.dialect);
+        if (asRecord(asRecord(Array.isArray(ast) ? ast[0] : undefined)?.Query)) return true;
+      } catch {
+        // Reject illegal continuations; parser diagnostics are not a keyword API.
+      }
+    }
+    return false;
+  });
+}
+
 /**
  * Analyze a parsing copy, never the editor buffer. The user's prefix and token
  * range are captured first and are independent from the AST placeholder.
  */
 export function analyzeContext(request: CompletionRequest): CompletionContext {
+  return analyzeCompletionContext(request).context;
+}
+
+export function analyzeCompletionContext(request: CompletionRequest): CompletionAnalysis {
   const { sql, dialect } = request;
   const cursor = Math.max(0, Math.min(sql.length, request.cursor));
   const allTokens = scan(sql, dialect);
@@ -338,9 +378,11 @@ export function analyzeContext(request: CompletionRequest): CompletionContext {
     cursor > token.start && (cursor < token.end || cursor === token.end && (!token.closed || token.delimiter === 'line')));
   if (suppressed) {
     return {
-      clause: lexicalClause(tokens, cursor), prefix: '', kinds: [], tables: [],
-      replaceRange: { start: cursor, end: cursor }, statementRange,
-      parserStatus: 'suppressed', parserMessage: '光标位于注释或字符串中，不请求补全。',
+      context: {
+        clause: lexicalClause(tokens, cursor), prefix: '', kinds: [], tables: [],
+        replaceRange: { start: cursor, end: cursor }, statementRange,
+        parserStatus: 'suppressed', parserMessage: '光标位于注释或字符串中，不请求补全。',
+      },
     };
   }
   const target = tokens.find((token) => isIdentifier(token) && (
@@ -355,17 +397,24 @@ export function analyzeContext(request: CompletionRequest): CompletionContext {
   const qualifier = qualifierBefore(tokens, target?.start ?? cursor);
   const qualificationDot = tokens.filter((token) => token.end <= (target?.start ?? cursor)).at(-1)?.value === '.';
   const clause = lexicalClause(tokens, target?.start ?? cursor);
+  const previous = tokens.filter((token) => token.end <= (target?.start ?? cursor)).at(-1);
+  const afterAs = previous?.kind === 'word' && previous.value.toUpperCase() === 'AS';
+  // Explicit aliases declare a new name. Preserve this policy if parsing fails;
+  // nested AS tokens (such as CAST types) need an AST role before applying it.
+  const explicitAlias = afterAs && previous.depth === 0 && ['select', 'from', 'join'].includes(clause);
   const complex = hasComplexScope(tokens);
   const context: CompletionContext = {
     clause, prefix, ...(qualifier ? { qualifier } : {}),
-    kinds: lexicalKinds(clause, tokens, replaceRange, qualifier),
+    kinds: explicitAlias ? [] : lexicalKinds(clause, tokens, replaceRange, qualifier),
     tables: complex ? [] : lexicalTables(tokens, request.database, replaceRange),
     replaceRange, statementRange, parserStatus: 'lexical',
   };
   if (qualificationDot && !qualifier) {
     return {
-      ...context, kinds: [], tables: [],
-      parserMessage: '限定名缺少有效的库名、表名或别名，暂不请求元数据。',
+      context: {
+        ...context, kinds: [], tables: [],
+        parserMessage: '限定名缺少有效的库名、表名或别名，暂不请求元数据。',
+      },
     };
   }
   const restrictQuotedKinds = () => {
@@ -388,6 +437,11 @@ export function analyzeContext(request: CompletionRequest): CompletionContext {
     ? [{ sql: candidate + target.delimiter, reason: '在解析副本中补齐标识符右引号' }]
     : [];
   const attempts = [{ sql: candidate, reason: '' }, ...quoteRepair, ...repairCandidates(candidate, dialect)];
+  let aliasKeywords: string[] | undefined;
+  const applyAliasPolicy = () => {
+    aliasKeywords = afterAs || target?.kind === 'quoted' ? [] : aliasKeywordCandidates(request, context);
+    context.kinds = aliasKeywords.length ? ['keyword'] : [];
+  };
   for (let position = 0; position < attempts.length; position++) {
     const attempt = attempts[position];
     try {
@@ -415,18 +469,32 @@ export function analyzeContext(request: CompletionRequest): CompletionContext {
         case 'table': context.kinds = qualifier ? ['table'] : ['database', 'table']; break;
         case 'column': context.kinds = qualifier ? ['column'] : ['column', 'function', 'keyword']; break;
         case 'function': context.kinds = ['function']; break;
-        case 'alias': context.kinds = ['keyword']; break;
+        case 'alias': applyAliasPolicy(); break;
       }
       restrictQuotedKinds();
       context.parserMessage = `${sentinel} → ${marker.path.join('.')} (${marker.role})` +
         (position > 0 ? `；${attempt.reason}。原解析错误：${errorMessage}` : '') +
         (complex ? '；复杂查询作用域暂不解析，已禁用字段检索以避免跨作用域推荐。' : '');
-      return context;
+      return { context, ...(aliasKeywords ? { aliasKeywords } : {}) };
     } catch (error) {
       if (!errorMessage) errorMessage = error instanceof Error ? error.message : String(error);
     }
   }
   const statementKeyword = tokens[0]?.value.toUpperCase();
+  if (statementKeyword === 'SELECT' || statementKeyword === 'WITH') {
+    // A malformed suffix must not turn an alias back into an expression or a
+    // broad keyword search. Classify the cursor using only the parsing prefix.
+    const prefixCandidate = left + gapLeft + sentinel;
+    for (const attempt of [{ sql: prefixCandidate }, ...repairCandidates(prefixCandidate, dialect)]) {
+      try {
+        const ast: unknown = parse(attempt.sql, dialect);
+        if (findMarker(ast, attempt.sql, insertedAt)?.role === 'alias') applyAliasPolicy();
+        break;
+      } catch {
+        // Keep the existing lexical fallback when the prefix cannot be parsed.
+      }
+    }
+  }
   if (statementKeyword !== 'SELECT' && statementKeyword !== 'WITH') {
     context.tables = [];
     context.kinds = ['keyword'];
@@ -436,5 +504,5 @@ export function analyzeContext(request: CompletionRequest): CompletionContext {
   }
   context.parserMessage = `占位符解析失败，按词法上下文降级：${errorMessage}` +
     (complex ? '；复杂查询作用域暂不解析，已禁用字段检索。' : '');
-  return context;
+  return { context, ...(aliasKeywords ? { aliasKeywords } : {}) };
 }

@@ -265,3 +265,60 @@ test('strings and comments do not query the metadata index', async () => {
     assert.deepEqual(calls, []);
   }
 });
+
+test('explicit aliases do not query any metadata endpoint', async () => {
+  for (const marked of [
+    "SELECT u.email AS |\nFROM demo.users AS u\nWHERE u.status = 'active';",
+    'SELECT email AS user_em|ail FROM demo.users',
+    'SELECT * FROM demo.users AS |',
+    'SELECT email AS | FROM demo.users WHERE id = =',
+  ]) {
+    const { index, calls } = indexFixture();
+    const response = await complete(request(marked), index);
+    assert.deepEqual(response.items, [], marked);
+    assert.deepEqual(calls, [], marked);
+  }
+});
+
+test('implicit alias edits do not query metadata without a legal keyword continuation', async () => {
+  for (const sql of [
+    'SELECT email user_em| FROM demo.users',
+    'SELECT email | FROM demo.users',
+    'SELECT * FROM demo.users user_em|',
+    'SELECT email user_em| FROM demo.users WHERE id = =',
+    'SELECT email AS FR|',
+    'SELECT email `FR|` FROM demo.users',
+  ]) {
+    const { index, calls } = indexFixture();
+    const response = await complete(request(sql), index, { matchMode: 'contains' });
+    assert.deepEqual(response.items, [], sql);
+    assert.deepEqual(calls, [], sql);
+  }
+});
+
+test('ambiguous alias prefixes only accept legal keyword insertions from the index', async () => {
+  for (const [sql, expected] of [
+    ['SELECT email FR|', ['FROM']],
+    ['SELECT email fr| demo.users', ['FROM']],
+    ['SELECT email FR| demo.users WHERE id =', ['FROM']],
+    ['SELECT * FROM demo.users WH|', ['WHERE']],
+    ['SELECT * FROM demo.users JO| demo.orders ON users.id = orders.user_id', ['JOIN']],
+    ['SELECT * FROM demo.users JOIN demo.orders O|', ['ON']],
+    ['SELECT email A|', ['AS']],
+    ['SELECT * FROM demo.users GR|', ['group   by']],
+  ]) {
+    const { index, calls } = indexFixture({
+      searchKeywords: (params) => result(params, [
+        ...['FROM', 'FROMAGE', 'AS', 'WHERE', 'JOIN', 'ON', 'SELECT', 'DISTINCT', 'CASE', 'FRUIT', 'group   by'].map((word) => ({
+          id: `keyword:${word}`, kind: 'keyword', label: word, insertText: word, detail: '', popularity: 100,
+        })),
+        { id: 'misleading', kind: 'keyword', label: 'FROM', insertText: 'DISTINCT', detail: '', popularity: 100 },
+      ]),
+    });
+    const input = request(sql);
+    const response = await complete(input, index, { matchMode: 'contains' });
+    assert.deepEqual(calls.map((call) => call.method), ['searchKeywords'], sql);
+    assert.equal(calls[0].params.query, response.context.prefix, sql);
+    assert.deepEqual(response.items.map((item) => item.insertText), expected, sql);
+  }
+});
