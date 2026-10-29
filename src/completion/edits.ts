@@ -1,4 +1,4 @@
-import type { AppliedCompletion, CompletionItem, SqlDocument, TextRange } from './types';
+import type { AppliedCompletion, CompletionItem, SqlDocument, TextRange } from './types.js';
 
 /** Pure document edit; parser-specific quoting was resolved when ranking items. */
 export function applyCompletionEdit(

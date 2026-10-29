@@ -1,9 +1,9 @@
-import { analyzeContext, initializeParser } from './context';
+import { analyzeContext, initializeParser } from './context.js';
 import type {
   CompletionContext, CompletionItem, CompletionKind, CompletionRequest, CompletionSearchOptions,
   CompletionResult, IndexItem, MetadataIndex, SearchOptions, SearchParams,
   SearchResult, TableReference,
-} from './types';
+} from './types.js';
 
 // Conservative cross-dialect dictionary: quoting an extra identifier is safe.
 // A production adapter can supply dialect/version-specific keyword metadata.

@@ -1,11 +1,11 @@
-import { initializeParser } from './context';
-import { applyCompletionEdit } from './edits';
-import { complete } from './service';
+import { initializeParser } from './context.js';
+import { applyCompletionEdit } from './edits.js';
+import { complete } from './service.js';
 import type {
   AppliedCompletion, ApplyCompletionInput, CompletionItem, CompletionRequest,
   SearchOptions, SqlCompletion, SqlCompletionConfig, SqlCompletionInput,
   SqlCompletionResult, SqlDialect, SqlDocument, TextRange,
-} from './types';
+} from './types.js';
 
 export type SqlCompletionErrorCode = 'DISPOSED' | 'STALE_RESULT' | 'DOCUMENT_CHANGED' | 'UNKNOWN_ITEM';
 

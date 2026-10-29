@@ -1,21 +1,15 @@
 import { defineConfig } from 'vite';
+import { sqlparserWasmPlugin } from './build/sqlparser-wasm.ts';
 
 export default defineConfig({
-  plugins: [{
-    name: 'bundle-sqlparser-wasm-loader',
-    enforce: 'pre',
-    transform(code, id) {
-      if (!id.split('?')[0].replaceAll('\\', '/').endsWith('/@guanmingchiu/sqlparser-ts/dist/index.mjs')) return;
-      // The package hides this import from Vite. Expose only its browser loader
-      // so the JS glue and WASM binary both receive deployable, hashed URLs.
-      const bundled = code.replace(
-        /\/\*\s*@vite-ignore\s*\*\/(\s*['"]\.\.\/wasm\/sqlparser_rs_wasm\.js['"])/,
-        '$1',
-      );
-      return { code: bundled, map: null };
+  plugins: [sqlparserWasmPlugin()],
+  build: {
+    target: 'es2023',
+    license: true,
+    lib: {
+      entry: { index: 'src/index.ts', metadata: 'src/metadata/index.ts' },
+      formats: ['es'],
+      fileName: (_format, entryName) => `${entryName}.js`,
     },
-  }],
-  optimizeDeps: {
-    exclude: ['@guanmingchiu/sqlparser-ts'],
   },
 });

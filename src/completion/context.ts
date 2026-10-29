@@ -7,7 +7,7 @@ import type {
   SqlDialect,
   TableReference,
   TextRange,
-} from './types';
+} from './types.js';
 
 const sentinel = '__suggestion__';
 const recoveryTable = '__completion_recovery_table__';

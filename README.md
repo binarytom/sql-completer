@@ -1,25 +1,108 @@
-# SQL Studio
+# sql-completer
 
-一个基于 TypeScript、Vite 和 `@guanmingchiu/sqlparser-ts` 的浏览器 SQL 补全演示：解析光标上下文，调用元数据索引，再由前端排序和插入候选。
+sql-completer 是一个可被外部项目引用的 TypeScript SQL 补全模块。项目使用 **sqlparser-ts**（npm 包名 `@guanmingchiu/sqlparser-ts`）及其 WebAssembly 解析器解析 SQL，提取光标位置的语法上下文。模块接收 SQL 与光标位置，通过注入的元数据索引搜索候选，返回排序后的建议和可应用的文档编辑。
 
-## 功能
+当前提供 ESM、TypeScript 类型声明及解析器 WASM，主要面向浏览器编辑器。仓库内的浏览器演示应用独立消费该模块。
 
-- 补全关键字、库、表、字段和函数，支持表别名、限定名、JOIN 与同名字段消歧。
-- 对不完整 SQL 使用占位符解析、有限修复和词法降级；注释、字符串内抑制补全。
-- 提供 MySQL、PostgreSQL、Generic 方言选项，以及字段、库表、JOIN、函数等示例。
-- 展示 AST、搜索前缀、替换范围、表作用域和各索引请求参数。
-- 支持异步搜索取消、过期结果丢弃、候选去重和前端评分。
+## 文档导航
 
-## 本地运行
+| 文档 | 内容 |
+| --- | --- |
+| [补全设计与 API](docs/completion-design.md) | 分层、配置、实例方法、取消、结果有效性和补全规则 |
+| [元数据扩展](docs/metadata-index.md) | 五类搜索契约、HTTP 适配、分页、取消和 mock 行为 |
+| [打包与部署](docs/packaging.md) | 公共入口、产物、WASM、安装包验证与发布边界 |
+| [开发约定](AGENTS.md) | 文件职责、编码、测试和提交要求 |
 
-需要 **Node.js 24 或以上**和 npm。测试使用 Node 内置测试运行器与 TypeScript 加载钩子。
+## 能力与公共入口
+
+模块支持关键字、库、表、字段和函数补全，以及表别名、限定名、JOIN 和同名字段消歧。不完整 SQL 使用解析副本修复和词法降级；注释、字符串内抑制补全。实例负责请求取消、过期结果处理和文档编辑校验。
+
+| 入口 | 导出 |
+| --- | --- |
+| `sql-completer` | `createSqlCompletion`、`SqlCompletionError` 和公共类型 |
+| `sql-completer/metadata` | `MetadataIndex`、五类搜索参数、结果、取消选项和基础类型；仅类型 |
+
+每个编辑器创建一个补全实例。外部项目实现 `MetadataIndex` 后注入，可对接 HTTP、本地目录或缓存；五个搜索方法也可以独立调用。HTTP 服务、编辑器 UI 和 mock 均由接入方提供。
+
+## 安装与接入
+
+当前包名为 `sql-completer`，版本为 `0.1.0`，保持 `private: true`，尚未发布到 npm registry。开发和验证仓库需要 **Node.js 24 或以上**及 npm；该版本要求不代表浏览器需要 Node.js。
+
+在本仓库生成安装包：
+
+```sh
+npm ci
+npm pack
+```
+
+在外部项目安装生成的文件：
+
+```sh
+npm install /path/to/sql-completer-0.1.0.tgz
+```
+
+以下是可独立接入的最小本地索引示例。它仅提供 `demo.users` 表候选，其余四类搜索返回空结果；完整目录实现可参考[元数据扩展](docs/metadata-index.md)。
+
+```ts
+import { createSqlCompletion } from 'sql-completer';
+import type {
+  IndexItem, MetadataIndex, SearchParams, SearchResult,
+} from 'sql-completer/metadata';
+
+async function emptySearch(params: SearchParams): Promise<SearchResult> {
+  return { requestId: params.requestId, items: [], total: 0, elapsedMs: 0 };
+}
+
+const users: IndexItem = {
+  id: 'table:demo.users', kind: 'table', label: 'users', insertText: 'users',
+  detail: 'demo.users', database: 'demo', table: 'users', popularity: 100,
+};
+
+const index: MetadataIndex = {
+  searchDatabases: emptySearch,
+  searchColumns: emptySearch,
+  searchFunctions: emptySearch,
+  searchKeywords: emptySearch,
+  async searchTables(params, options) {
+    options?.signal?.throwIfAborted();
+    const query = params.query.toLocaleLowerCase();
+    const matches = params.matchMode === 'contains'
+      ? users.label.includes(query) : users.label.startsWith(query);
+    const items = matches && (!params.database || params.database === 'demo')
+      ? [users] : [];
+    return { requestId: params.requestId, items, total: items.length, elapsedMs: 0 };
+  },
+};
+
+const completion = createSqlCompletion({
+  index, connectionId: 'my-connection', database: 'demo', dialect: 'mysql',
+});
+
+async function example() {
+  await completion.ready(); // 可选预热；complete() 也会等待初始化。
+  const document = { sql: 'SELECT * FROM us', cursor: 'SELECT * FROM us'.length };
+  const result = await completion.complete(document);
+  const item = result.items.find((candidate) => candidate.id === users.id);
+  if (item) {
+    const next = completion.apply({ document, result, itemId: item.id });
+    console.log(next.sql); // SELECT * FROM users
+    // 编辑器将 next.sql 和 next.cursor 写回当前文档。
+  }
+}
+
+example().catch(console.error).finally(() => completion.dispose());
+```
+
+`cursor` 和编辑范围均使用 UTF-16 偏移，范围为 `[start, end)`。`apply()` 要求传入编辑器此刻的真实 SQL、光标和原始结果对象；文档或光标变化后应取消旧结果并重新补全。配置、方法和错误处理见[补全设计与 API](docs/completion-design.md#补全-api)。
+
+## 运行演示
 
 ```sh
 npm ci
 npm run dev
 ```
 
-打开终端打印的本地地址。输入 SQL 自动触发补全；点击左侧目录中的表可载入字段补全示例，工具栏可切换方言和当前库。
+打开终端打印的地址。演示提供方言和当前库切换、SQL 示例、候选列表、AST、作用域与请求参数观察台。数据来自浏览器内 mock，无须后端；`demo-local` 是该 mock 的连接限制，外部索引可使用自己的连接标识。
 
 | 操作 | 快捷键 |
 | --- | --- |
@@ -29,166 +112,54 @@ npm run dev
 | 关闭补全并取消当前请求 | `Esc` |
 | 插入两个空格 | `Tab`（候选弹窗关闭时） |
 
-## 开发命令
+## 开发与验证
 
 | 命令 | 作用 |
 | --- | --- |
-| `npm ci` | 按锁文件安装依赖 |
-| `npm run dev` | 启动 Vite 开发服务器 |
-| `npm test` | 运行上下文分析、排序和元数据契约测试，使用真实 WASM 解析器 |
-| `npm run build` | 执行 TypeScript 检查并构建到 `dist/` |
-| `npm run preview` | 启动生产产物预览；先运行构建 |
+| `npm ci` | 按锁文件安装开发依赖 |
+| `npm run dev` | 从库源码启动演示开发服务器 |
+| `npm test` | 运行行为测试，使用真实 WASM 解析器 |
+| `npm run build:lib` | 构建库 JS、WASM 和类型声明至 `dist/` |
+| `npm run build:demo` | 检查库与演示类型，使用已构建的库生成 `dist-demo/`；先构建库 |
+| `npm run build` | 顺序构建库与演示 |
+| `npm run test:package` | 构建库，在临时项目安装真实 tarball，验证类型、入口和 WASM |
+| `npm pack` | 通过 `prepack` 构建库并生成 `.tgz` |
+| `npm run preview` | 预览 `dist-demo/`；先运行 `npm run build` |
 
-提交前运行 `npm test` 和 `npm run build`。修改解析器加载逻辑时，也应在生产预览中检查 WASM 初始化。
-
-## 补全模块接入
-
-编辑器统一从 `src/completion/index.ts` 导入 `createSqlCompletion` 和公共类型。每个编辑器创建一个实例，实例负责解析初始化、索引召回、排序、请求取消、结果有效性和安全替换；UI 只负责触发、展示和把编辑结果写回。`context.ts`、`service.ts` 和 `edits.ts` 是内部实现，不需要由业务页面分别调用。
-
-```ts
-import { createSqlCompletion } from './src/completion/index';
-import { createMockMetadataIndex } from './src/metadata';
-
-const completion = createSqlCompletion({
-  index: createMockMetadataIndex((entry) => console.log(entry)),
-  connectionId: 'demo-local',
-  database: 'demo',
-  dialect: 'mysql',
-});
-
-async function example() {
-  // 可选预热；complete() 也会等待解析器初始化。
-  await completion.ready();
-  const document = {
-    sql: 'SELECT u.em FROM demo.users u',
-    cursor: 'SELECT u.em'.length,
-  };
-  const result = await completion.complete(document);
-  const item = result.items.find((candidate) =>
-    candidate.kind === 'column' && candidate.label === 'email');
-  if (item) {
-    const next = completion.apply({ document, result, itemId: item.id });
-    console.log(next.sql, next.cursor, next.edit);
-    // SELECT u.email FROM demo.users u
-    // UI 将 next.sql 和 next.cursor 写回编辑器。
-  }
-}
-
-example().catch(console.error).finally(() => completion.dispose());
-```
-
-示例路径相对于仓库根目录；当前模块随此 Vite 项目使用，尚未发布为独立 npm 包。集成到其他构建系统时需保留 `vite.config.ts` 中解析器 JS/WASM 的加载适配。
-
-### 配置与调用契约
-
-| `createSqlCompletion(config)` 参数 | 说明 |
-| --- | --- |
-| `index` | 必填，注入实现五类搜索的 `MetadataIndex`；模块不依赖 mock、HTTP 或 DOM |
-| `connectionId` | 必填，连接标识；当前 mock 仅接受 `demo-local` |
-| `database` | 必填，默认当前库，不能为空 |
-| `dialect` | `mysql`（默认）/ `postgresql` / `generic` |
-| `limit` | 每个索引的召回数量，`1..100` 的整数，默认 `30` |
-| `matchMode` | `prefix`（默认）/ `contains` |
-
-| 方法 | 输入与返回 |
-| --- | --- |
-| `ready()` | `Promise<void>`；可选预热解析器，重复调用共用初始化过程 |
-| `complete(input, options?)` | `input: { sql, cursor, database?, dialect? }`；`options: { signal? }`；返回 `Promise<SqlCompletionResult>` |
-| `apply(input)` | `{ document: { sql, cursor }, result, itemId }`；同步返回 `{ sql, cursor, edit: { range, text } }` |
-| `cancel()` | 取消当前请求，使已有结果失效，实例可继续使用 |
-| `dispose()` | 取消请求并永久销毁实例；编辑器卸载时调用，可重复调用 |
-
-`SqlCompletionResult` 包含 `requestId`、已排序的 `items`、`context`、`elapsedMs`、`errors`。每个候选有 `id`、`label`、`insertText`、`kind`、`score` 和 `reason`；`context` 提供 `prefix`、`qualifier`、`tables`、`replaceRange`、`parserStatus` 等诊断信息。索引部分失败仍返回可用候选和 `errors`，可结合 UI 提示降级状态。
-
-`cursor`、`range.start/end` 均为 **UTF-16 偏移**，范围是 `[start, end)`，可直接与 `textarea.selectionStart` 对接。接口只接受单光标位置；UI 在非空选区时应抑制补全。`apply()` 应传入编辑器此刻的真实 SQL 和光标，以及 `complete()` 返回的同一个 `result` 对象；接受一次后结果失效。模块内部保留原始候选和替换范围的快照，展示层重新排序或修改结果不会改变实际插入文本。
-
-每次有效的 `complete()` 会取代上次请求并使旧结果失效；主动取消、外部 `AbortSignal`、新请求或销毁都会让进行中的调用以 `AbortError` 拒绝。即使索引适配器忽略取消，旧调用也会立即结束；适配器仍应遵守 `signal` 以释放网络资源。SQL、光标、库或方言变化时，UI 应立即 `cancel()` 并安排新请求，展示层自行选择防抖间隔。普通取消无需显示错误。
-
-`apply()` 的状态错误为 `SqlCompletionError`，可读取 `code`：
-
-| `code` | 处理方式 |
-| --- | --- |
-| `DISPOSED` | 实例已销毁，重新创建实例 |
-| `STALE_RESULT` | 结果被替代、已接受、取消或来自其他实例，重新补全 |
-| `DOCUMENT_CHANGED` | SQL 或光标与生成结果时不同，重新补全 |
-| `UNKNOWN_ITEM` | `itemId` 不属于该结果，使用返回候选的 ID |
-
-销毁后调用 `ready()` / `complete()` 同样会拒绝 `DISPOSED`。非法配置抛出 `TypeError` / `RangeError`，非法光标偏移抛出 `RangeError`。初始化失败会拒绝 `ready()` / `complete()`；当前解析器全局复用初始化 Promise，刷新页面重新加载，不能依赖重建实例自动重试。
-
-## 实现链路
-
-```text
-SQL + 光标 → 原始前缀与替换范围 → 占位符副本解析
-           → 有限修复 / 词法降级 → 并行索引搜索
-           → 前端评分与去重 → 确认候选后替换原文
-```
-
-以 `SELECT u.em|ail FROM demo.users u` 为例，`|` 表示光标：
-
-1. 从原文保存 `prefix: 'em'`、`qualifier: 'u'`，替换范围覆盖完整的 `email` token。
-2. 解析副本使用 `SELECT u.__suggestion__ FROM demo.users u`，定位字段角色和 `u → demo.users` 作用域。
-3. 字段索引收到 `query: 'em'` 和 `tables: [{ database: 'demo', table: 'users', alias: 'u' }]`。
-4. 选择 `email` 后替换完整 token，保留 `u.`，避免插入成 `emailail`。
-
-恢复操作只修改解析副本。解析异常用于诊断和修复选择，失败后仍可按 token 上下文给出建议。
-
-## 元数据索引接口
-
-`MetadataIndex` 的五个异步方法共享 `(params, { signal? }) => Promise<SearchResult>` 契约。下列 HTTP 路径是接入后端时的约定，**当前实现为浏览器内 mock，没有 HTTP 服务或真实数据库连接**。
-
-| 方法 | 约定端点（均为 `POST`） | 作用域参数 |
-| --- | --- | --- |
-| `searchDatabases` | `/api/completion/databases/search` | 无附加参数，搜索库 |
-| `searchTables` | `/api/completion/tables/search` | `database?`；省略时可跨库搜索 |
-| `searchColumns` | `/api/completion/columns/search` | `tables`；仅搜索指定表，空数组返回空结果 |
-| `searchFunctions` | `/api/completion/functions/search` | `database?`；按 `dialect` 过滤函数 |
-| `searchKeywords` | `/api/completion/keywords/search` | `clause`；按当前 SQL 子句检索 |
-
-通用参数为 `requestId`、`connectionId`、`dialect`、`query`、`matchMode`、`limit`、可选分页 `cursor`。这里的分页 `cursor` 是不透明字符串，与编辑器的数字光标偏移不同。响应包含 `items`、`total`、可选 `nextCursor`、`elapsedMs`，并原样返回 `requestId`。接口接收前缀和作用域，无须接收整段 SQL；`AbortSignal` 只作为调用选项。
-
-mock 支持忽略大小写的前缀/包含搜索、稳定分页和取消。索引先按名称分页，前端再按匹配程度、语法角色、当前库、字段作用域和热度评分。
-
-接入后端时实现并注入 `MetadataIndex`，五个方法分别转发到上表端点，使用 `JSON.stringify(params)` 作为请求体，并把 `options?.signal` 传给 `fetch`。`SearchOptions` 只包含传输取消选项，`limit`、`matchMode` 由实例配置进入请求参数。完整参数类型、字段响应示例及 HTTP 适配代码见 [方案与接口设计](docs/completion-design.md#接入真实服务)。
-
-每次发起搜索都会通过 `console.info('[metadata-index]', endpoint, params)` 打印完整参数。页面下方请求观察台可查看参数快照、耗时和 `pending / success / error / cancelled` 状态；预先取消的请求不会发起或记录。
-
-### Mock 目录与方言
-
-| 库 | 表 |
-| --- | --- |
-| `demo` | `users`、`orders`、`products` |
-| `analytics` | `events`、`sessions`、`revenue_daily` |
-| `warehouse` | `dim_customers`、`fact_orders` |
-
-连接标识固定为 `demo-local`，模拟 40–100 ms 延迟。共享函数包括 `COUNT`、`SUM`、`COALESCE` 等；MySQL 另有 `IFNULL`、`DATE_FORMAT`，PostgreSQL 另有 `DATE_TRUNC`、`STRING_AGG`；Generic 仅提供共享函数。
+提交前运行 `npm test` 和 `npm run build`。调整公共导出、声明或打包逻辑后，再运行 `npm run test:package`；调整解析器或 WASM 加载时，在生产预览中验证初始化和键盘插入。
 
 ## 项目结构
 
 ```text
 src/
-  main.ts                 编辑器、候选交互、目录和请求观察台
-  style.css               页面样式
-  metadata.ts             五类 mock 索引、分页与参数日志
+  index.ts                 补全公共入口
   completion/
-    index.ts              公开入口：工厂、错误类型与公共契约
-    engine.ts             实例生命周期、并发取消与结果有效性
-    types.ts              编辑器接口、上下文与索引契约
-    context.ts            光标分析、占位符解析、恢复与作用域
-    service.ts            并行召回、评分、去重与插入文本生成
-    edits.ts              纯文本编辑和插入后的光标定位
-tests/*.test.mjs           Node 测试
-scripts/test-loader.mjs    测试用 TypeScript 加载钩子
-vite.config.ts            构建配置与解析器 JS/WASM 加载适配
-docs/completion-design.md 完整方案与接口设计
+    engine.ts              初始化、取消、结果与文档校验
+    context.ts             光标上下文、解析恢复与作用域
+    service.ts             搜索编排、排序、去重和插入文本生成
+    edits.ts               纯文档编辑
+    types.ts               补全契约与内部请求类型
+  metadata/
+    index.ts               元数据扩展公共入口（仅类型）
+    types.ts               五类搜索契约
+  shared/types.ts          方言、候选类别、子句与表引用
+examples/demo/             演示页面、样式、mock、日志类型和静态资源
+build/sqlparser-wasm.ts    库构建与开发服务器的解析器加载适配
+scripts/test-loader.mjs    源码行为测试的 TypeScript 加载钩子
+tests/*.test.mjs           源码行为测试
+tests/package/            安装包消费测试
+vite.config.ts             库构建
+vite.demo.config.ts        演示开发、构建与预览
+tsconfig.json              库与演示的类型检查配置
+tsconfig.lib.json          仅为库生成类型声明
+docs/                      设计、元数据扩展、打包部署文档
 ```
 
-分层以职责和变化原因划分：页面处理交互，`engine` 统一编排，`context` 处理 SQL 语义，`service` 处理候选策略，`edits` 处理文档变更，索引适配器处理数据来源。原有解析、召回和 mock 分层保留；此前散在页面里的初始化、轮次取消和替换逻辑已收回公共入口，接入其他编辑器无需复制这些逻辑。
+## 当前范围
 
-## 当前边界与扩展
+- 以 SELECT 查询为主；其他语句降级为关键字建议。CTE、嵌套 SELECT 和集合运算场景保守地禁用字段召回。
+- 方言为 MySQL、PostgreSQL、Generic；目录采用 `database.table` 两段式模型，尚未实现 catalog/schema/table 三层作用域。
+- 每类搜索仅召回第一页，默认 `limit: 30`，可配置到 `100`；大目录中的后续页候选可能漏召回。
+- 当前提供 ESM，浏览器为主要目标。Node 24 安装包烟雾测试验证了真实解析和补全；其他打包器、worker、SSR 初始化及其他服务端环境需单独验证。
 
-- 以 SELECT 查询为主；其他语句降级为关键字建议。检测到 CTE、嵌套 SELECT 或集合运算时禁用字段召回，避免跨作用域推荐。
-- 目录采用 `database.table` 两段式模型；尚未实现 PostgreSQL 的 catalog/schema/table 三层作用域。
-- 补全链路目前只请求每个接口的第一页，默认 `limit: 30`（可配置到 `100`）；大目录中后续页的高分候选可能漏召回。
-- 接入真实服务时实现同一 `MetadataIndex`，并在服务端完成连接鉴权、目录权限过滤和日志脱敏。
-
-详细契约、恢复规则及接入建议见 [方案与接口设计](docs/completion-design.md)；开发约定见 [Repository Guidelines](AGENTS.md)。
+WASM 随安装包分发，消费项目无需额外安装解析器或复制本仓库的构建插件。部署和发布说明见[打包与部署](docs/packaging.md)。

@@ -1,8 +1,9 @@
+import type { RequestLog } from './types.js';
 import type {
   ColumnSearchParams, DatabaseSearchParams, FunctionSearchParams, IndexItem,
-  KeywordSearchParams, MetadataIndex, RequestLog, SearchOptions, SearchParams,
+  KeywordSearchParams, MetadataIndex, SearchOptions, SearchParams,
   SearchResult, SqlClause, SqlDialect, TableSearchParams,
-} from './completion/types';
+} from 'sql-completer/metadata';
 
 export const MOCK_DATABASES = ['demo', 'analytics', 'warehouse'];
 

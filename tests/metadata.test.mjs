@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createMockMetadataIndex, MOCK_DATABASES } from '../src/metadata.ts';
+import { createMockMetadataIndex, MOCK_DATABASES } from '../examples/demo/mock-metadata.ts';
 
 function params(overrides = {}) {
   return {

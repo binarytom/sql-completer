@@ -1,7 +1,8 @@
+import type { RequestLog } from './types.js';
 import './style.css';
-import { createSqlCompletion } from './completion/index';
-import { createMockMetadataIndex, MOCK_DATABASES } from './metadata';
-import type { CompletionItem, SqlCompletionResult, RequestLog, SqlDialect } from './completion/index';
+import { createSqlCompletion } from 'sql-completer';
+import { createMockMetadataIndex, MOCK_DATABASES } from './mock-metadata.js';
+import type { CompletionItem, SqlCompletionResult, SqlDialect } from 'sql-completer';
 
 const icons = {
   database: '<ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 4 16 4 16 0V5M4 12c0 4 16 4 16 0"/>',
@@ -28,7 +29,7 @@ const samples = [
 
 document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
   <aside class="rail">
-    <a class="brand" href="#" aria-label="SQL Studio 首页"><span class="brand-mark">${icon('keyword')}</span><span>SQL<span class="brand-light">Studio</span></span></a>
+    <a class="brand" href="#" aria-label="sql-completer 首页"><span class="brand-mark">${icon('keyword')}</span><span>sql<span class="brand-light">-completer</span></span></a>
     <div class="workspace-label">WORKSPACE <span>LOCAL</span></div>
     <div class="nav-item active">${icon('spark')}<span>智能补全实验室</span><span class="nav-dot"></span></div>
     <div class="rail-section"><span>数据目录</span><span class="small-badge">MOCK</span></div>

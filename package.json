@@ -1,19 +1,38 @@
 {
-  "name": "sql-advisor-demo",
+  "name": "sql-completer",
   "private": true,
-  "version": "0.0.0",
+  "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "tsc && vite build",
+    "dev": "vite --config vite.demo.config.ts",
+    "build": "npm run build:lib && npm run build:demo",
+    "build:lib": "vite build && tsc -p tsconfig.lib.json",
+    "build:demo": "tsc --noEmit && vite build --config vite.demo.config.ts",
     "test": "node --import ./scripts/test-loader.mjs --test tests/*.test.mjs",
-    "preview": "vite preview"
+    "preview": "vite preview --config vite.demo.config.ts",
+    "prepack": "npm run build:lib",
+    "test:package": "npm run build:lib && node --test tests/package/*.test.mjs"
   },
   "devDependencies": {
     "typescript": "~6.0.3",
-    "vite": "^8.3.4"
-  },
-  "dependencies": {
+    "vite": "^8.3.4",
     "@guanmingchiu/sqlparser-ts": "^0.63.0"
+  },
+  "description": "Editor-independent browser SQL completion with extensible metadata search",
+  "sideEffects": false,
+  "files": [
+    "dist"
+  ],
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./metadata": {
+      "types": "./dist/metadata/index.d.ts",
+      "import": "./dist/metadata.js"
+    }
   }
 }

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createSqlCompletion, SqlCompletionError } from '../src/completion/index.ts';
+import { createSqlCompletion, SqlCompletionError } from '../src/index.ts';
 
 function document(markedSql, overrides = {}) {
   const cursor = markedSql.indexOf('|');
